@@ -1,0 +1,6 @@
+[submodule "mqtt-bridge"]
+	path = mqtt-bridge
+	url = https://github.com/emente/mqtt-bridge.git
+[submodule "esp32-c5-sniffer"]
+	path = esp32-c5-sniffer
+	url = https://github.com/emente/esp32-c5-sniffer.git
