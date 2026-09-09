@@ -4,3 +4,6 @@
 [submodule "esp32-c5-sniffer"]
 	path = esp32-c5-sniffer
 	url = https://github.com/emente/esp32-c5-sniffer.git
+[submodule "citsviewer"]
+	path = citsviewer
+	url = https://github.com/emente/citsviewer.git
