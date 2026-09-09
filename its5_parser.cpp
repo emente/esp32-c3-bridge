@@ -61,3 +61,8 @@ bool its5_parse(uint8_t b, its5_frame_t *frame)
     }
     return false;
 }
+
+void its5_reset(void)
+{
+    position = 0;
+}

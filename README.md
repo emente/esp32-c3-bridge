@@ -1,6 +1,8 @@
-External device TX -> ESP32 RX / RX0
-External device GND -> ESP32 GND
-com10
+Sniffer (esp32-c5-sniffer) TX -> ESP32 GPIO16 (U2RX)
+Sniffer RX -> ESP32 GPIO17 (U2TX)
+Sniffer GND -> ESP32 GND
+
+See SD_CARD.md for the SD card wiring (VSPI bus, freed up by the pins above).
 
 mosquitto_sub -h cits1.opentrafficmap.org -p 8883 --insecure -t 'its/+/packet' -v
 

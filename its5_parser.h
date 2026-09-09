@@ -18,3 +18,8 @@ typedef struct {
 
 // parse a single byte of ITS5 data, returns true if a complete frame was parsed
 bool its5_parse(uint8_t c, its5_frame_t *frame);
+
+// reset parser state back to "waiting for a new frame". Used between SD log
+// files during replay so a truncated/corrupt file can't leave the parser
+// stuck mid-frame for the next live Serial1 byte.
+void its5_reset(void);

@@ -11,6 +11,8 @@
 #include <ESPAsyncWebServer.h>
 #include "MiniShell.h"
 #include <PubSubClient.h>
+#include <SPI.h>
+#include <SD.h>
 
 #include "config.h"
 #include "parse.h"
@@ -82,8 +84,20 @@ static sniffer_stats_t sniffer_stats;
 static bool sniffer_stats_valid = false;
 static uint32_t sniffer_stats_received_ms = 0;
 static const char *wifi_ap_password = "itsg5setup";
-static constexpr int packet_rx_pin = 18;
-static constexpr int packet_tx_pin = 19;
+// Board: AZ-Delivery "D1 Mini ESP32" (classic dual-core ESP32, no native
+// USB -- console is via an external CP2102/CH340 bridge on GPIO1/3). Pin
+// choices below follow this board's own silkscreen labels; see SD_CARD.md
+// for the full wiring rationale and diagram.
+//
+// U2RX/U2TX (this board's labeled default UART2 pins) for the sniffer
+// link, freeing the VSPI bus (GPIO18/19/23/5, also silkscreen-labeled on
+// this board) for the SD card below.
+static constexpr int packet_rx_pin = 16;
+static constexpr int packet_tx_pin = 17;
+// VSPI SS/CS pin (see SD_CARD.md); SCK/MOSI/MISO come from the board's
+// default SPI pin mapping used automatically by SD.begin().
+static constexpr int sd_cs_pin = SS;
+static constexpr const char *sd_log_dir = "/logs";
 // Upper bound on how many Serial1 bytes loop() drains in one go. Without
 // this, a jammed/noisy sniffer board that keeps streaming non-frame
 // garbage forever can make the drain loop below monopolize the CPU,
@@ -146,6 +160,149 @@ static void blue_led(int on)
         last_on = on;
         digitalWrite(LED_BUILTIN, on ? LOW : HIGH);
     }
+}
+
+// Forward declaration: defined below, but sd_replay_file() (further down
+// this section) needs to call it before that point in the file.
+static bool mqtt_publish(const char *topic, const uint8_t *payload, size_t length);
+
+
+// ---------------------------------------------------------------------------
+// SD card packet logging (see SD_CARD.md for wiring)
+//
+// Every captured packet is appended to one growing log file per boot,
+// encoded exactly as the ITS5 wire format (see its5_parser.h): "ITS5" magic
+// + type + sec + usec + len + payload. That makes a log file directly
+// replayable through the same its5_parse() state machine used for the live
+// Serial1 stream (see sd_replay_file()), with no separate on-disk format to
+// maintain.
+//
+// File naming: /logs/logNNNNN.its5, NNNNN chosen once at boot as
+// (highest existing counter) + 1, so a fresh log file is started every
+// power-cycle and no existing file is ever overwritten or appended to
+// across reboots.
+// ---------------------------------------------------------------------------
+
+static bool sd_available = false;
+static File sd_log_file;
+
+// openNextFile()'s File::name() returns a bare filename on some core
+// versions and a full "/logs/xxx" path on others; normalize both to a
+// full path so callers don't have to care which.
+static String sd_full_path(const char *dir, const char *name)
+{
+    if (name[0] == '/') {
+        return String(name);
+    }
+    return String(dir) + "/" + name;
+}
+
+static const char *sd_basename(const char *name)
+{
+    const char *slash = strrchr(name, '/');
+    return slash ? slash + 1 : name;
+}
+
+static uint32_t sd_next_log_counter(void)
+{
+    uint32_t max_n = 0;
+    File dir = SD.open(sd_log_dir);
+    if (!dir) {
+        return 1;
+    }
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        if (!f.isDirectory()) {
+            uint32_t n = 0;
+            if (sscanf(sd_basename(f.name()), "log%05lu.its5", (unsigned long *) &n) == 1 && n > max_n) {
+                max_n = n;
+            }
+        }
+        f.close();
+    }
+    dir.close();
+    return max_n + 1;
+}
+
+static void sd_log_begin(void)
+{
+    if (!SD.begin(sd_cs_pin)) {
+        printf("SD card: not found / init failed (logging disabled)\n");
+        sd_available = false;
+        return;
+    }
+    if (!SD.exists(sd_log_dir) && !SD.mkdir(sd_log_dir)) {
+        printf("SD card: failed to create %s (logging disabled)\n", sd_log_dir);
+        sd_available = false;
+        return;
+    }
+    char filename[48];
+    snprintf(filename, sizeof(filename), "%s/log%05lu.its5", sd_log_dir, (unsigned long) sd_next_log_counter());
+    sd_log_file = SD.open(filename, FILE_WRITE);
+    if (!sd_log_file) {
+        printf("SD card: failed to open %s for writing (logging disabled)\n", filename);
+        sd_available = false;
+        return;
+    }
+    sd_available = true;
+    printf("SD card: logging packets to %s\n", filename);
+}
+
+// Re-encodes `frame` exactly as the ITS5 wire format and appends it to the
+// current log file. Flushes every packet (not just on close) so a power
+// loss loses at most the in-flight write, not the whole session -- SD
+// writes are infrequent enough (packet rate, not byte rate) that this
+// isn't a meaningful wear/performance concern here.
+static void sd_log_packet(const its5_frame_t &frame)
+{
+    if (!sd_available || !sd_log_file) {
+        return;
+    }
+    uint8_t header[ITS5_HEADER_LEN];
+    memcpy(header, "ITS5", 4);
+    header[4] = frame.type;
+    header[5] = frame.sec & 0xFF;
+    header[6] = (frame.sec >> 8) & 0xFF;
+    header[7] = (frame.sec >> 16) & 0xFF;
+    header[8] = (frame.sec >> 24) & 0xFF;
+    header[9] = frame.usec & 0xFF;
+    header[10] = (frame.usec >> 8) & 0xFF;
+    header[11] = (frame.usec >> 16) & 0xFF;
+    header[12] = (frame.usec >> 24) & 0xFF;
+    header[13] = frame.len & 0xFF;
+    header[14] = (frame.len >> 8) & 0xFF;
+
+    sd_log_file.write(header, sizeof(header));
+    sd_log_file.write(frame.payload, frame.len);
+    sd_log_file.flush();
+}
+
+// Feeds one SD log file through the same its5_parse() state machine used
+// for live Serial1 data, republishing every captured packet frame to MQTT
+// exactly like a live one. Keeps both brokers' connections alive with
+// periodic loop() calls, since a big replay can take a while and nothing
+// else services them while this runs (shell commands run to completion
+// before control returns to the main loop()).
+static void sd_replay_file(File &f)
+{
+    its5_frame_t frame;
+    uint32_t packets = 0;
+    while (f.available() > 0) {
+        int c = f.read();
+        if (c < 0) {
+            break;
+        }
+        if (its5_parse((uint8_t) c, &frame)) {
+            if (frame.type == ITS5_TYPE_PACKET && frame.len > 0) {
+                mqtt_publish(mqtt_packet_topic, frame.payload, frame.len);
+                packets++;
+            }
+            for (mqtt_broker_t *b : brokers) {
+                b->client.loop();
+            }
+        }
+    }
+    its5_reset();
+    printf(" %lu packet(s) replayed\n", (unsigned long) packets);
 }
 
 
@@ -413,6 +570,96 @@ static int do_sniffer(int argc, char *argv[])
     return 0;
 }
 
+static int do_sd(int argc, char *argv[])
+{
+    printf("available: %s\n", sd_available ? "yes" : "no");
+    if (!sd_available) {
+        return -1;
+    }
+    printf("card size: %llu MB\n", SD.cardSize() / (1024ULL * 1024ULL));
+    printf("used:      %llu MB\n", SD.usedBytes() / (1024ULL * 1024ULL));
+
+    uint32_t count = 0;
+    File dir = SD.open(sd_log_dir);
+    if (dir) {
+        for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+            if (!f.isDirectory()) {
+                count++;
+            }
+            f.close();
+        }
+        dir.close();
+    }
+    printf("log files: %lu\n", (unsigned long) count);
+    if (sd_log_file) {
+        printf("current log: %u bytes written this session\n", (unsigned) sd_log_file.size());
+    }
+    return 0;
+}
+
+static int do_sdreplay(int argc, char *argv[])
+{
+    if (!sd_available) {
+        printf("SD card not available\n");
+        return -1;
+    }
+    File dir = SD.open(sd_log_dir);
+    if (!dir) {
+        printf("Cannot open %s\n", sd_log_dir);
+        return -1;
+    }
+    uint32_t files = 0;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        if (!f.isDirectory()) {
+            printf("Replaying %s (%u bytes)...", f.name(), (unsigned) f.size());
+            sd_replay_file(f);
+            files++;
+        }
+        f.close();
+    }
+    dir.close();
+    printf("Replay complete: %lu file(s)\n", (unsigned long) files);
+    return 0;
+}
+
+static int do_sddelete(int argc, char *argv[])
+{
+    if (!sd_available) {
+        printf("SD card not available\n");
+        return -1;
+    }
+    if (argc < 2 || strcmp(argv[1], "yes") != 0) {
+        printf("This deletes ALL log files on the SD card. Re-run as: sddelete yes\n");
+        return -1;
+    }
+
+    // Close (and stop writing to) the current session's log file before
+    // possibly deleting it out from under an open handle.
+    if (sd_log_file) {
+        sd_log_file.close();
+    }
+
+    uint32_t deleted = 0;
+    File dir = SD.open(sd_log_dir);
+    if (dir) {
+        for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+            bool is_dir = f.isDirectory();
+            String path = sd_full_path(sd_log_dir, f.name());
+            f.close();
+            if (!is_dir && SD.remove(path)) {
+                deleted++;
+            }
+        }
+        dir.close();
+    }
+    printf("Deleted %lu log file(s)\n", (unsigned long) deleted);
+
+    // Resume logging with a fresh file (counter restarts at 1 since none
+    // remain, which is fine -- there's nothing left for it to collide with).
+    sd_log_begin();
+    return 0;
+}
+
 int do_cpu(int argc, char *argv[])
 {
     if (argc > 1) {
@@ -457,6 +704,9 @@ static const cmd_t commands[] = {
     { "tx", do_tx, "Set WiFi tx power" },
     { "stats", do_stats, "Show statistic internals" },
     { "sniffer", do_sniffer, "Show last received sniffer statistics" },
+    { "sd", do_sd, "Show SD card logging status" },
+    { "sdreplay", do_sdreplay, "Republish all SD log files to MQTT" },
+    { "sddelete", do_sddelete, "<yes> Delete all SD log files" },
     { "cpu", do_cpu, "<MHz> Set CPU speed" },
     { "ls", do_ls, "List files" },
     { NULL, NULL, NULL }
@@ -471,19 +721,19 @@ void setup(void)
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, HIGH);
 
-    // configure SPI idle
-    pinMode(SCK, INPUT_PULLUP);
-    pinMode(MOSI, INPUT_PULLUP);
-    pinMode(MISO, INPUT_PULLUP);
-    pinMode(SS, INPUT_PULLUP);
-
     blue_led(true);
 
     Serial.begin(115200);
     Serial.println("Hello from ESP32-C3 bridge!");
 
-    // Keep the USB console on UART0 and use UART1 for packet input.
+    // Keep the USB console on UART0 and use UART2 (U2RX/U2TX on this
+    // board's silkscreen) for packet input.
     Serial1.begin(115200, SERIAL_8N1, packet_rx_pin, packet_tx_pin);
+
+    // SD card packet logging, see SD_CARD.md for wiring. Uses the VSPI bus
+    // (freed above by moving the sniffer link off it), so must come after
+    // Serial1.begin() claimed its own pins, not before.
+    sd_log_begin();
 
     // get unique ESP32-C3 ID
     uint64_t chipid = ESP.getEfuseMac();
@@ -662,6 +912,11 @@ void loop(void)
         printf(".");
         pending_frame_valid = false;
     } else if (have_packet) {
+        // Log to SD first, independent of MQTT connectivity -- a broker
+        // outage should never mean a captured packet is lost, only that
+        // it's not been forwarded live yet (see the "sdreplay" command).
+        sd_log_packet(pending_frame);
+
         // send over mqtt
         blue_led(true);
         bool packet_sent = mqtt_publish(
