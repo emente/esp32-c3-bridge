@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WiFi setup</title>
+    <link rel="stylesheet" href="classless.css">
+</head>
+
+<body>
+    <p><a href="/">/home</a></p>
+    <h1>WiFi setup</h1>
+    <p>Enter the network that the bridge should connect to.</p>
+    <form action="/wifi" method="post">
+        <label>Network name (SSID)
+            <input type="text" name="ssid" required autocomplete="off">
+        </label>
+        <label>Password
+            <input type="password" name="password" autocomplete="off">
+        </label>
+        <button type="submit">Save and connect</button>
+    </form>
+</body>
+
+</html>

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>C-ITS G5 OpenTraffic MQTT bridge</title>
+    <link rel="icon" type="image/x-icon" href="favicon.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <br>
+    <div class="dashboard">
+        <div class="card">
+            <h2>Messages per Minute</h2>
+            <div class="chart-container">
+                <div class="chart-area">
+                    <div id="chart"></div>
+                    <div class="x-axis">
+                        <div>an hour ago</div>
+                        <div>now</div>
+                    </div>
+                </div>
+                <div class="y-axis">
+                    <div id="y-max">max</div>
+                    <div>0</div>
+                </div>
+            </div>
+            <div>Latest message: <span id="latest"></span></div>
+        </div>
+        <div class="card">
+            <h2>System Information</h2>
+            <table id="sysinfo"><tbody></tbody></table>
+        </div>
+        <div class="card">
+            <a href="/config.html">Configuration</a>
+            <a href="/wifi">WiFi setup</a>
+        </div>
+    </div>
+
+    <script src="datetime.js"></script>
+    <script src="sysinfo.js"></script>
+    <script src="stats.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Configuration</title>
+    <link rel="icon" type="image/x-icon" href="favicon.png">
+    <link rel="stylesheet" href="classless.css">
+</head>
+
+<body>
+    <p style="text-align:left"><a href="/">/home</a></p>
+    <form action="/config" method="post" id="config">
+        <fieldset>
+            <legend>System configuration</legend>
+            <div class="row">
+                <label class="col-2">CPU speed
+                    <select name="sys_cpu_speed" required>
+                        <option value="80">80 MHz</option>
+                        <option value="160">160 MHz</option>
+                    </select>
+                </label>
+                <label class="col">NTP server
+                    <input type="text" name="ntp_server">
+                </label>
+            </div>
+        </fieldset>
+        <fieldset>
+            <legend>MQTT configuration</legend>
+            <div class="row">
+                <label class="col-2">Protocol
+                    <select name="mqtt_protocol" required>
+                        <option value="mqtt">mqtt</option>
+                        <option value="mqtts">mqtts</option>
+                    </select>
+                </label>
+                <label class="col">Broker host (leave empty to disable)
+                    <input type="text" name="mqtt_broker_host">
+                </label>
+                <label class="col-2">Port
+                    <input type="number" name="mqtt_broker_port" min="0" required>
+                </label>
+            </div>
+            <div class="row">
+                <label class="col-2">Option
+                    <select name="mqtt_insecure" required>
+                        <option value="false">-</option>
+                        <option value="true">Insecure</option>
+                    </select>
+                    <!-- <input type="checkbox" name="mqtt_insecure" style="width: auto;"> -->
+                </label>
+                <label class="col">Client user name
+                    <input type="text" name="mqtt_user">
+                </label>
+                <label class="col">Password
+                    <input type="text" name="mqtt_pass">
+                </label>
+            </div>
+        </fieldset>
+        <fieldset>
+            <legend>Second MQTT configuration (optional)</legend>
+            <div class="row">
+                <label class="col-2">Protocol
+                    <select name="mqtt2_protocol" required>
+                        <option value="mqtt">mqtt</option>
+                        <option value="mqtts">mqtts</option>
+                    </select>
+                </label>
+                <label class="col">Broker host (leave empty to disable)
+                    <input type="text" name="mqtt2_broker_host">
+                </label>
+                <label class="col-2">Port
+                    <input type="number" name="mqtt2_broker_port" min="0" required>
+                </label>
+            </div>
+            <div class="row">
+                <label class="col-2">Option
+                    <select name="mqtt2_insecure" required>
+                        <option value="false">-</option>
+                        <option value="true">Insecure</option>
+                    </select>
+                </label>
+                <label class="col">Client user name
+                    <input type="text" name="mqtt2_user">
+                </label>
+                <label class="col">Password
+                    <input type="text" name="mqtt2_pass">
+                </label>
+            </div>
+        </fieldset>
+        <fieldset>
+            <legend>OTA updates</legend>
+            <div class="row">
+                <label class="col">Password (leave empty to disable OTA authentication)
+                    <input type="password" name="ota_password">
+                </label>
+            </div>
+        </fieldset>
+
+        <!-- Import / Export -->
+        <div class="row">
+            <button type="submit" id="submit">Save</button>
+            <input type="file" id="file" accept=".json" style="display:none">
+            <button type="button" onclick="importConfig()">Import...</button>
+            <button type="button" onclick="exportConfig()">Export...</button>
+        </div>
+    </form>
+
+    <script src="config.js"></script>
+</body>
+
+</html>
