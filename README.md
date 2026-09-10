@@ -4,7 +4,9 @@ Sniffer GND -> ESP32 GND
 
 See SD_CARD.md for the SD card wiring (VSPI bus, freed up by the pins above).
 
-mosquitto_sub -h cits1.opentrafficmap.org -p 8883 --insecure -t 'its/+/packet' -v
+Wachting the MQTT Data:
+
+mosquitto_sub -h localhost -p 8883 --insecure -t 'its/+/packet' -v
 
 
 # its-g5-receiver
