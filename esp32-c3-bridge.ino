@@ -188,6 +188,10 @@ static File sd_log_file;
 // Total packets written to the SD card since boot (not reset by "sddelete"
 // starting a fresh file -- that's a new file, not a new power-up).
 static uint32_t sd_packets_written = 0;
+// Current working directory for the ls/cd/dir/rm/format commands below.
+// Reset to "/" on boot; a card swap mid-session isn't detected, so a stale
+// path just fails to open on the next command like any other SD I/O error.
+static String sd_cwd = "/";
 
 // openNextFile()'s File::name() returns a bare filename on some core
 // versions and a full "/logs/xxx" path on others; normalize both to a
@@ -286,7 +290,17 @@ static void sd_log_packet(const its5_frame_t &frame)
 // periodic loop() calls, since a big replay can take a while and nothing
 // else services them while this runs (shell commands run to completion
 // before control returns to the main loop()).
-static void sd_replay_file(File &f)
+//
+// Paced with a small delay() after every published packet. Two reasons:
+// unlike live capture (naturally rate-limited by actual RF arrival + the
+// sniffer's UART throughput), a replay is bound only by SD read speed and
+// how fast mqtt_publish() accepts calls -- easily 10-100x any realistic
+// live rate with nothing slowing it down, which could burst-flood the
+// broker. And delay() is what actually yields to the RTOS/feeds the task
+// watchdog here -- the mqtt client loop() calls alone don't reliably do
+// either, so a large enough file replayed in one unbroken call could trip
+// the watchdog without this.
+static uint32_t sd_replay_file(File &f)
 {
     its5_frame_t frame;
     uint32_t packets = 0;
@@ -299,6 +313,7 @@ static void sd_replay_file(File &f)
             if (frame.type == ITS5_TYPE_PACKET && frame.len > 0) {
                 mqtt_publish(mqtt_packet_topic, frame.payload, frame.len);
                 packets++;
+                delay(5);
             }
             for (mqtt_broker_t *b : brokers) {
                 b->client.loop();
@@ -307,6 +322,7 @@ static void sd_replay_file(File &f)
     }
     its5_reset();
     printf(" %lu packet(s) replayed\n", (unsigned long) packets);
+    return packets;
 }
 
 
@@ -608,22 +624,55 @@ static int do_sdreplay(int argc, char *argv[])
         printf("SD card not available\n");
         return -1;
     }
+    // "delete" deletes a file once it's been FED to mqtt_publish() for
+    // every packet in it -- same "attempted, not confirmed-delivered"
+    // semantics mqtt_publish() already has for live packets (it returns
+    // success even when every broker is down, rather than blocking; see
+    // its own doc comment), so this doesn't invent a stronger guarantee
+    // replay never had. The file currently being logged to this session is
+    // never deleted regardless, even if asked -- SD.remove() on a file
+    // still open for writing elsewhere is undefined behaviour here, not
+    // just unwanted.
+    bool delete_after = (argc > 1 && strcmp(argv[1], "delete") == 0);
+    if (argc > 1 && !delete_after) {
+        printf("Unknown option '%s' (only \"delete\" is supported)\n", argv[1]);
+        return -1;
+    }
+
     File dir = SD.open(sd_log_dir);
     if (!dir) {
         printf("Cannot open %s\n", sd_log_dir);
         return -1;
     }
     uint32_t files = 0;
+    uint32_t deleted = 0;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-        if (!f.isDirectory()) {
-            printf("Replaying %s (%u bytes)...", f.name(), (unsigned) f.size());
-            sd_replay_file(f);
-            files++;
+        if (f.isDirectory()) {
+            f.close();
+            continue;
         }
+        String path = sd_full_path(sd_log_dir, f.name());
+        bool is_current = sd_log_file && strcmp(sd_basename(path.c_str()), sd_basename(sd_log_file.name())) == 0;
+        printf("Replaying %s (%u bytes)...", f.name(), (unsigned) f.size());
+        sd_replay_file(f);
         f.close();
+        files++;
+        if (delete_after) {
+            if (is_current) {
+                printf("Not deleting %s: still this session's active log file\n", path.c_str());
+            } else if (SD.remove(path)) {
+                deleted++;
+            } else {
+                printf("Failed to delete %s\n", path.c_str());
+            }
+        }
     }
     dir.close();
-    printf("Replay complete: %lu file(s)\n", (unsigned long) files);
+    printf("Replay complete: %lu file(s)", (unsigned long) files);
+    if (delete_after) {
+        printf(", %lu deleted", (unsigned long) deleted);
+    }
+    printf("\n");
     return 0;
 }
 
@@ -661,6 +710,151 @@ static int do_sddelete(int argc, char *argv[])
 
     // Resume logging with a fresh file (counter restarts at 1 since none
     // remain, which is fine -- there's nothing left for it to collide with).
+    sd_log_begin();
+    return 0;
+}
+
+// Resolves an ls/cd/rm argument against sd_cwd: absolute paths pass
+// through, ".." goes up one level, anything else is relative, and a
+// missing argument means "the current directory itself".
+static String sd_resolve_path(const char *arg)
+{
+    if (!arg || arg[0] == '\0') {
+        return sd_cwd;
+    }
+    if (arg[0] == '/') {
+        return String(arg);
+    }
+    if (strcmp(arg, "..") == 0) {
+        int slash = sd_cwd.lastIndexOf('/');
+        return slash <= 0 ? String("/") : sd_cwd.substring(0, slash);
+    }
+    return sd_cwd == "/" ? ("/" + String(arg)) : (sd_cwd + "/" + String(arg));
+}
+
+// "dir" is a plain alias for this -- same command, two names, so either
+// habit (Unix or Windows) works at this prompt.
+static int do_sdls(int argc, char *argv[])
+{
+    if (!sd_available) {
+        printf("SD card not available\n");
+        return -1;
+    }
+    String path = sd_resolve_path(argc > 1 ? argv[1] : nullptr);
+    File dir = SD.open(path);
+    if (!dir || !dir.isDirectory()) {
+        printf("Not a directory: %s\n", path.c_str());
+        return -1;
+    }
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        if (f.isDirectory()) {
+            printf("%10s  %s/\n", "<DIR>", sd_basename(f.name()));
+        } else {
+            printf("%10u  %s\n", (unsigned) f.size(), sd_basename(f.name()));
+        }
+        f.close();
+    }
+    dir.close();
+    printf("%s\n", path.c_str());
+    return 0;
+}
+
+static int do_sdcd(int argc, char *argv[])
+{
+    if (!sd_available) {
+        printf("SD card not available\n");
+        return -1;
+    }
+    String path = argc > 1 ? sd_resolve_path(argv[1]) : String("/");
+    File dir = SD.open(path);
+    if (!dir || !dir.isDirectory()) {
+        printf("No such directory: %s\n", path.c_str());
+        return -1;
+    }
+    dir.close();
+    sd_cwd = path;
+    printf("%s\n", sd_cwd.c_str());
+    return 0;
+}
+
+static int do_sdrm(int argc, char *argv[])
+{
+    if (!sd_available) {
+        printf("SD card not available\n");
+        return -1;
+    }
+    if (argc < 2) {
+        printf("Usage: rm <filename>\n");
+        return -1;
+    }
+    String path = sd_resolve_path(argv[1]);
+    // Refuse to remove whatever this session is still actively logging to
+    // -- SD.remove() on a file that's also open for writing elsewhere is
+    // undefined behaviour here, not just an inconvenience.
+    if (sd_log_file && strcmp(sd_basename(path.c_str()), sd_basename(sd_log_file.name())) == 0) {
+        printf("Refusing to remove %s: still this session's active log file\n", path.c_str());
+        return -1;
+    }
+    if (!SD.remove(path)) {
+        printf("Failed to remove %s (not found, or it's a directory -- rm only removes files)\n", path.c_str());
+        return -1;
+    }
+    printf("Removed %s\n", path.c_str());
+    return 0;
+}
+
+// Depth-first delete of everything under `path` (files and, once emptied,
+// the directories themselves) -- see do_sdformat's own comment for why
+// this recursive delete stands in for a real format.
+static uint32_t sd_delete_recursive(const char *path)
+{
+    uint32_t deleted = 0;
+    File dir = SD.open(path);
+    if (!dir) {
+        return 0;
+    }
+    if (!dir.isDirectory()) {
+        dir.close();
+        return 0;
+    }
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        bool is_dir = f.isDirectory();
+        String child = sd_full_path(path, f.name());
+        f.close();
+        if (is_dir) {
+            deleted += sd_delete_recursive(child.c_str());
+            SD.rmdir(child);
+        } else if (SD.remove(child)) {
+            deleted++;
+        }
+    }
+    dir.close();
+    return deleted;
+}
+
+static int do_sdformat(int argc, char *argv[])
+{
+    if (!sd_available) {
+        printf("SD card not available\n");
+        return -1;
+    }
+    if (argc < 2 || strcmp(argv[1], "yes") != 0) {
+        printf("This deletes EVERYTHING reachable on the SD card, not just log files.\n"
+               "(Not a real low-level FAT format -- the SD library used here doesn't\n"
+               "expose one -- just a recursive delete of every file/directory it can see.)\n"
+               "Re-run as: format yes\n");
+        return -1;
+    }
+    if (sd_log_file) {
+        sd_log_file.close();
+    }
+    uint32_t deleted = sd_delete_recursive("/");
+    sd_cwd = "/";
+    printf("Deleted %lu file(s)\n", (unsigned long) deleted);
+
+    if (!SD.exists(sd_log_dir)) {
+        SD.mkdir(sd_log_dir);
+    }
     sd_log_begin();
     return 0;
 }
@@ -710,10 +904,15 @@ static const cmd_t commands[] = {
     { "stats", do_stats, "Show statistic internals" },
     { "sniffer", do_sniffer, "Show last received sniffer statistics" },
     { "sd", do_sd, "Show SD card logging status" },
-    { "sdreplay", do_sdreplay, "Republish all SD log files to MQTT" },
+    { "sdreplay", do_sdreplay, "[delete] Republish all SD log files to MQTT (and delete each afterwards)" },
     { "sddelete", do_sddelete, "<yes> Delete all SD log files" },
     { "cpu", do_cpu, "<MHz> Set CPU speed" },
-    { "ls", do_ls, "List files" },
+    { "lsfs", do_ls, "List files on the internal (LittleFS) filesystem" },
+    { "ls", do_sdls, "[<dir>] List an SD card directory (alias: dir)" },
+    { "dir", do_sdls, "[<dir>] List an SD card directory (alias: ls)" },
+    { "cd", do_sdcd, "[<dir>] Change SD card directory (no arg = root)" },
+    { "rm", do_sdrm, "<file> Delete one file from the SD card" },
+    { "format", do_sdformat, "<yes> Recursively delete EVERYTHING on the SD card" },
     { NULL, NULL, NULL }
 };
 
