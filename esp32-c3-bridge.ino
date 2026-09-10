@@ -185,6 +185,9 @@ static bool mqtt_publish(const char *topic, const uint8_t *payload, size_t lengt
 
 static bool sd_available = false;
 static File sd_log_file;
+// Total packets written to the SD card since boot (not reset by "sddelete"
+// starting a fresh file -- that's a new file, not a new power-up).
+static uint32_t sd_packets_written = 0;
 
 // openNextFile()'s File::name() returns a bare filename on some core
 // versions and a full "/logs/xxx" path on others; normalize both to a
@@ -274,6 +277,7 @@ static void sd_log_packet(const its5_frame_t &frame)
     sd_log_file.write(header, sizeof(header));
     sd_log_file.write(frame.payload, frame.len);
     sd_log_file.flush();
+    sd_packets_written++;
 }
 
 // Feeds one SD log file through the same its5_parse() state machine used
@@ -573,6 +577,7 @@ static int do_sniffer(int argc, char *argv[])
 static int do_sd(int argc, char *argv[])
 {
     printf("available: %s\n", sd_available ? "yes" : "no");
+    printf("packets written since boot: %lu\n", (unsigned long) sd_packets_written);
     if (!sd_available) {
         return -1;
     }
@@ -939,7 +944,7 @@ void loop(void)
 
     // keep stats up-to-date
     if (stats_update()) {
-        StaticJsonDocument < 256 > doc;
+        StaticJsonDocument < 320 > doc;
         doc["temp"] = temperatureRead();
         doc["rssi"] = WiFi.RSSI();
         if (sniffer_stats_valid) {
@@ -954,7 +959,10 @@ void loop(void)
             }
             sniffer["age_ms"] = millis() - sniffer_stats_received_ms;
         }
-        uint8_t json[256];
+        JsonObject sd = doc["sd"].to < JsonObject > ();
+        sd["found"] = sd_available;
+        sd["packets_written"] = sd_packets_written;
+        uint8_t json[320];
         size_t size = serializeJson(doc, json);
         if ((size > 0) && mqtt_publish(mqtt_stats_topic, json, size)) {
             printf("Published %s: %s\n", mqtt_stats_topic, json);
