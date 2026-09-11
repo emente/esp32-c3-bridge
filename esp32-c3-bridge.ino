@@ -78,6 +78,8 @@ typedef struct __attribute__((packed)) {
     uint16_t queueSize;
     int8_t rssi;
     uint8_t haveRssi;
+    float tempC;
+    uint8_t haveTemp;
 } sniffer_stats_t;
 
 static sniffer_stats_t sniffer_stats;
@@ -586,6 +588,11 @@ static int do_sniffer(int argc, char *argv[])
         printf("Sniffer RSSI: %d dBm\n", sniffer_stats.rssi);
     } else {
         printf("Sniffer RSSI: unavailable\n");
+    }
+    if (sniffer_stats.haveTemp) {
+        printf("Sniffer temp: %.1f C\n", sniffer_stats.tempC);
+    } else {
+        printf("Sniffer temp: unavailable\n");
     }
     return 0;
 }
@@ -1143,7 +1150,7 @@ void loop(void)
 
     // keep stats up-to-date
     if (stats_update()) {
-        StaticJsonDocument < 320 > doc;
+        StaticJsonDocument < 384 > doc;
         doc["temp"] = temperatureRead();
         doc["rssi"] = WiFi.RSSI();
         if (sniffer_stats_valid) {
@@ -1156,12 +1163,15 @@ void loop(void)
             if (sniffer_stats.haveRssi) {
                 sniffer["rssi"] = sniffer_stats.rssi;
             }
+            if (sniffer_stats.haveTemp) {
+                sniffer["temp_c"] = sniffer_stats.tempC;
+            }
             sniffer["age_ms"] = millis() - sniffer_stats_received_ms;
         }
         JsonObject sd = doc["sd"].to < JsonObject > ();
         sd["found"] = sd_available;
         sd["packets_written"] = sd_packets_written;
-        uint8_t json[320];
+        uint8_t json[384];
         size_t size = serializeJson(doc, json);
         if ((size > 0) && mqtt_publish(mqtt_stats_topic, json, size)) {
             printf("Published %s: %s\n", mqtt_stats_topic, json);
