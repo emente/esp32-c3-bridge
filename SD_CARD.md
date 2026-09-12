@@ -8,8 +8,8 @@ This firmware runs on the "D1 Mini ESP32" board
 
 | Signal            | GPIO | Board silkscreen label |
 |-------------------|------|-------------------------|
-| Sniffer UART RX   | 16   | `IO16` / `U2RX`         |
-| Sniffer UART TX   | 17   | `IO17` / `U2TX`         |
+| Sniffer UART RX   | 17   | `IO16` / `U2RX`         |
+| Sniffer UART TX   | 16   | `IO17` / `U2TX`         |
 | SD card SCK       | 18   | `CLK`                   |
 | SD card MISO      | 19   | `MISO`                  |
 | SD card MOSI      | 23   | `MOSI`                  |
@@ -50,7 +50,7 @@ source.
 
 New CLI commands (`pio device monitor`, or the same shell over USB):
 
-- `sd` -- card status, free/used space, log file count, packets written
+- `sdinfo` -- card status, free/used space, log file count, packets written
   since boot. Also reported in the periodic MQTT stats payload (`"sd":
   {"found": bool, "packets_written": N}`).
 - `sdreplay [delete]` -- replays every log file's packets straight to MQTT
@@ -66,16 +66,11 @@ New CLI commands (`pio device monitor`, or the same shell over USB):
   session is never deleted even if asked.
 - `sddelete yes` -- deletes every log file in `/logs` (the `yes` is
   required, to avoid an accidental one-word wipe) and starts a fresh one.
-- `ls [dir]` / `dir [dir]` -- list an SD card directory (defaults to the
+- `sdls [dir]` / `dir [dir]` -- list an SD card directory (defaults to the
   current one).
-- `cd [dir]` -- change the SD card's current directory (no argument goes
+- `sdcd [dir]` -- change the SD card's current directory (no argument goes
   to `/`).
-- `rm <file>` -- delete one file from the SD card.
-- `format yes` -- recursively deletes *everything* reachable on the card,
-  not just `/logs`. Not a real low-level FAT format (the SD library used
-  here doesn't expose one), just a thorough recursive delete.
+- `sdrm <file>` -- delete one file from the SD card.
 
 (The internal LittleFS filesystem -- the web UI's static files, unrelated
-to the SD card -- keeps its own listing under `lsfs`, the previous name
-for what used to be plain `ls` before that name moved to the SD card
-above.)
+to the SD card -- keeps its own listing under `lsfs`.

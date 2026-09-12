@@ -27,7 +27,8 @@
 // config key prefix (e.g. "mqtt" -> mqtt_broker_host, mqtt_user, ...).
 // A broker is considered enabled when its "<prefix>_broker_host" config
 // value is non-empty; leaving it empty (the default) disables that slot.
-struct mqtt_broker_t {
+struct mqtt_broker_t
+{
     const char *prefix;
     PubSubClient client;
     WiFiClient plainClient;
@@ -42,7 +43,7 @@ struct mqtt_broker_t {
 // those library types being copy-constructible from a temporary.
 static mqtt_broker_t broker1;
 static mqtt_broker_t broker2;
-static mqtt_broker_t *brokers[] = { &broker1, &broker2 };
+static mqtt_broker_t *brokers[] = {&broker1, &broker2};
 
 static void mqtt_broker_init(mqtt_broker_t &b, const char *prefix)
 {
@@ -56,10 +57,10 @@ static MiniShell shell(&Serial);
 static WiFiEvent_t lastWifiEvent = ARDUINO_EVENT_NONE;
 static WiFiEvent_t wifiEvent = ARDUINO_EVENT_NONE;
 static String rootCA;
-static char esp_mac[24];        // e.g. "aa:bb:cc:dd:ee:ff"
+static char esp_mac[24]; // e.g. "aa:bb:cc:dd:ee:ff"
 static char esp_id[16];
 static uint8_t packet[2500];
-static StaticJsonDocument < 1024 > infoDoc;
+static StaticJsonDocument<1024> infoDoc;
 
 static char mqtt_info[256];
 static char mqtt_status_topic[128];
@@ -67,10 +68,17 @@ static char mqtt_info_topic[128];
 static char mqtt_stats_topic[128];
 static char mqtt_packet_topic[128];
 static its5_frame_t its5_frame;
+// Parser state for the LIVE Serial1 stream, persisted across loop()
+// iterations. Kept separate from sd_replay_file()'s own (stack-local)
+// parser state so a replay running concurrently with live capture can't
+// interleave its bytes into the same in-progress frame -- see
+// its5_parser_state_t's comment in its5_parser.h.
+static its5_parser_state_t live_parser_state;
 
 // Wire format for ITS5_TYPE_STATS frames, must match the layout the
 // esp32-c5-sniffer sends (see sniffer_stats_t in esp32-c5-sniffer.ino).
-typedef struct __attribute__((packed)) {
+typedef struct __attribute__((packed))
+{
     uint32_t uptimeMs;
     uint32_t sentPackets;
     uint32_t droppedPackets;
@@ -94,8 +102,8 @@ static const char *wifi_ap_password = "itsg5setup";
 // U2RX/U2TX (this board's labeled default UART2 pins) for the sniffer
 // link, freeing the VSPI bus (GPIO18/19/23/5, also silkscreen-labeled on
 // this board) for the SD card below.
-static constexpr int packet_rx_pin = 16;
-static constexpr int packet_tx_pin = 17;
+static constexpr int packet_rx_pin = 17;
+static constexpr int packet_tx_pin = 16;
 // VSPI SS/CS pin (see SD_CARD.md); SCK/MOSI/MISO come from the board's
 // default SPI pin mapping used automatically by SD.begin().
 static constexpr int sd_cs_pin = SS;
@@ -108,9 +116,26 @@ static constexpr const char *sd_log_dir = "/logs";
 // it just spreads draining a large backlog across a few extra loop()
 // iterations instead of blocking in one.
 static constexpr uint32_t max_serial_bytes_per_loop = 4096;
+// Serial1's hardware RX buffer size. Deliberately sized off the sniffer's
+// own packet queue capacity (QUEUE_SIZE=10 in esp32-c5-sniffer.ino), not off
+// max_serial_bytes_per_loop above (a separate, CPU-fairness concern): the
+// worst realistic burst onto this wire is the sniffer flushing its entire
+// queue back-to-back after being briefly unable to send, i.e. up to 10
+// max-size ITS5 frames (ITS5_HEADER_LEN + ITS5_MAX_PAYLOAD bytes each) =
+// ~23.6KB. Rounded up with headroom. This must comfortably clear that
+// regardless of Serial1's baud rate -- unlike a "how many ms of stall can
+// we absorb" budget, this bound doesn't shrink just because the link got
+// faster. Keep in sync with esp32-c5-sniffer.ino's QUEUE_SIZE and
+// its5_parser.h's ITS5_MAX_PAYLOAD if either ever changes.
+static constexpr uint32_t serial1_rx_buffer_bytes = 28672;
+// PubSubClient's publish() flatly refuses anything that doesn't fit in its
+// buffer (topic + up to ITS5_MAX_PAYLOAD bytes of packet payload + its own
+// ~7-byte header) -- must stay comfortably above ITS5_MAX_PAYLOAD or every
+// publish of a large packet silently fails with no distinguishing error.
+static constexpr uint32_t mqtt_buffer_bytes = 3072;
 static its5_frame_t pending_frame;
 static bool pending_frame_valid = false;
-static String device_hostname  = "its-bridge";
+static String device_hostname = "its-bridge";
 static constexpr const char *ota_hostname = "its-bridge";
 
 static bool mqtt_broker_enabled(mqtt_broker_t &b)
@@ -121,9 +146,11 @@ static bool mqtt_broker_enabled(mqtt_broker_t &b)
 static void mqtt_schedule_reconnect(mqtt_broker_t &b)
 {
     b.next_connect = millis() + b.connect_delay;
-    if (b.connect_delay < 60000) {
+    if (b.connect_delay < 60000)
+    {
         b.connect_delay *= 2;
-        if (b.connect_delay > 60000) {
+        if (b.connect_delay > 60000)
+        {
             b.connect_delay = 60000;
         }
     }
@@ -136,38 +163,54 @@ static void handleGetWifi(AsyncWebServerRequest *request)
 
 static void handlePostWifi(AsyncWebServerRequest *request)
 {
-    if (!request->hasParam("ssid", true)) {
+    if (!request->hasParam("ssid", true))
+    {
         request->send(400, "text/plain", "SSID is required");
         return;
     }
 
     String ssid = request->getParam("ssid", true)->value();
     String password = request->hasParam("password", true)
-        ? request->getParam("password", true)->value()
-        : "";
+                          ? request->getParam("password", true)->value()
+                          : "";
 
     WiFi.disconnect(true, true);
     delay(200);
     WiFi.begin(ssid.c_str(), password.c_str());
     request->send(200, "text/html",
-        "<html><body><h1>WiFi settings saved</h1>"
-        "<p>The bridge is connecting. Reconnect to the setup network or "
-        "open its new station IP after it connects.</p></body></html>");
+                  "<html><body><h1>WiFi settings saved</h1>"
+                  "<p>The bridge is connecting. Reconnect to the setup network or "
+                  "open its new station IP after it connects.</p></body></html>");
 }
 
 static void blue_led(int on)
 {
     static int last_on = -1;
-    if (on != last_on) {
+    if (on != last_on)
+    {
         last_on = on;
-        digitalWrite(LED_BUILTIN, on ? LOW : HIGH);
+        digitalWrite(LED_BUILTIN, !on ? LOW : HIGH);
     }
 }
+
+
+static void printhex(const uint8_t *buf, size_t len, int rowsize = 48)
+{
+    size_t i;
+    for (i = 0; i < len; i++) {
+        if ((rowsize > 0) && (i % rowsize) == 0) {
+            printf("\n%04X:", i);
+        }
+        printf("%02X", buf[i]);
+    }
+    printf("\n");
+}
+
 
 // Forward declaration: defined below, but sd_replay_file() (further down
 // this section) needs to call it before that point in the file.
 static bool mqtt_publish(const char *topic, const uint8_t *payload, size_t length);
-
+static void service_live_serial(uint32_t max_bytes);
 
 // ---------------------------------------------------------------------------
 // SD card packet logging (see SD_CARD.md for wiring)
@@ -200,7 +243,8 @@ static String sd_cwd = "/";
 // full path so callers don't have to care which.
 static String sd_full_path(const char *dir, const char *name)
 {
-    if (name[0] == '/') {
+    if (name[0] == '/')
+    {
         return String(name);
     }
     return String(dir) + "/" + name;
@@ -216,13 +260,17 @@ static uint32_t sd_next_log_counter(void)
 {
     uint32_t max_n = 0;
     File dir = SD.open(sd_log_dir);
-    if (!dir) {
+    if (!dir)
+    {
         return 1;
     }
-    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-        if (!f.isDirectory()) {
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile())
+    {
+        if (!f.isDirectory())
+        {
             uint32_t n = 0;
-            if (sscanf(sd_basename(f.name()), "log%05lu.its5", (unsigned long *) &n) == 1 && n > max_n) {
+            if (sscanf(sd_basename(f.name()), "log%05lu.its5", (unsigned long *)&n) == 1 && n > max_n)
+            {
                 max_n = n;
             }
         }
@@ -234,20 +282,23 @@ static uint32_t sd_next_log_counter(void)
 
 static void sd_log_begin(void)
 {
-    if (!SD.begin(sd_cs_pin)) {
+    if (!SD.begin(sd_cs_pin))
+    {
         printf("SD card: not found / init failed (logging disabled)\n");
         sd_available = false;
         return;
     }
-    if (!SD.exists(sd_log_dir) && !SD.mkdir(sd_log_dir)) {
+    if (!SD.exists(sd_log_dir) && !SD.mkdir(sd_log_dir))
+    {
         printf("SD card: failed to create %s (logging disabled)\n", sd_log_dir);
         sd_available = false;
         return;
     }
     char filename[48];
-    snprintf(filename, sizeof(filename), "%s/log%05lu.its5", sd_log_dir, (unsigned long) sd_next_log_counter());
+    snprintf(filename, sizeof(filename), "%s/log%05lu.its5", sd_log_dir, (unsigned long)sd_next_log_counter());
     sd_log_file = SD.open(filename, FILE_WRITE);
-    if (!sd_log_file) {
+    if (!sd_log_file)
+    {
         printf("SD card: failed to open %s for writing (logging disabled)\n", filename);
         sd_available = false;
         return;
@@ -263,7 +314,8 @@ static void sd_log_begin(void)
 // isn't a meaningful wear/performance concern here.
 static void sd_log_packet(const its5_frame_t &frame)
 {
-    if (!sd_available || !sd_log_file) {
+    if (!sd_available || !sd_log_file)
+    {
         return;
     }
     uint8_t header[ITS5_HEADER_LEN];
@@ -286,12 +338,17 @@ static void sd_log_packet(const its5_frame_t &frame)
     sd_packets_written++;
 }
 
-// Feeds one SD log file through the same its5_parse() state machine used
-// for live Serial1 data, republishing every captured packet frame to MQTT
-// exactly like a live one. Keeps both brokers' connections alive with
-// periodic loop() calls, since a big replay can take a while and nothing
-// else services them while this runs (shell commands run to completion
-// before control returns to the main loop()).
+// Feeds one SD log file through the its5_parse() state machine, republishing
+// every captured packet frame to MQTT exactly like a live one. Uses its own
+// parser state (`replay_state`, stack-local) rather than live_parser_state,
+// and calls service_live_serial() every iteration -- both deliberately, so
+// this can run interleaved with live Serial1 traffic instead of blocking it
+// out: without that, live bytes would just sit unread in Serial1's small
+// hardware buffer for however long this replay takes (potentially minutes,
+// see the delay(50) below) and overflow. Keeps both brokers' connections
+// alive with periodic loop() calls too, since a big replay can take a while
+// and nothing else services them while this runs (shell commands run to
+// completion before control returns to the main loop()).
 //
 // Paced with a small delay() after every published packet. Two reasons:
 // unlike live capture (naturally rate-limited by actual RF arrival + the
@@ -302,31 +359,55 @@ static void sd_log_packet(const its5_frame_t &frame)
 // watchdog here -- the mqtt client loop() calls alone don't reliably do
 // either, so a large enough file replayed in one unbroken call could trip
 // the watchdog without this.
-static uint32_t sd_replay_file(File &f)
+//
+// `interleave_live` should be false only when `f` is the current session's
+// still-being-appended-to log file: service_live_serial() can itself call
+// sd_log_packet(), which appends to that same file through a second,
+// separate File handle (sd_log_file) -- reading `f` while it's concurrently extended
+// by another handle is not a risk worth taking for the one file that, being
+// still open, is already fully covered by live capture anyway. Every other
+// (closed, historical) file is safe to interleave.
+static uint32_t sd_replay_file(File &f, bool interleave_live)
 {
+    its5_parser_state_t replay_state = {};
     its5_frame_t frame;
     uint32_t packets = 0;
-    while (f.available() > 0) {
+    while (f.available() > 0)
+    {
         int c = f.read();
-        if (c < 0) {
+        if (c < 0)
+        {
             break;
         }
-        if (its5_parse((uint8_t) c, &frame)) {
-            if (frame.type == ITS5_TYPE_PACKET && frame.len > 0) {
+        if (its5_parse(&replay_state, (uint8_t)c, &frame))
+        {
+            if (frame.type == ITS5_TYPE_PACKET && frame.len > 0)
+            {
+                printhex(frame.payload,frame.len>48?48:frame.len);
                 mqtt_publish(mqtt_packet_topic, frame.payload, frame.len);
                 packets++;
-                delay(5);
+                delay(50);
             }
-            for (mqtt_broker_t *b : brokers) {
+            for (mqtt_broker_t *b : brokers)
+            {
                 b->client.loop();
             }
         }
+        // Service any live sniffer bytes that arrived while we were busy
+        // with the above -- see the function comment. Uses live_parser_state,
+        // never replay_state, so it can't corrupt this replay's in-progress
+        // frame (or vice versa).
+        if (interleave_live)
+        {
+            service_live_serial(max_serial_bytes_per_loop);
+        }
     }
-    its5_reset();
-    printf(" %lu packet(s) replayed\n", (unsigned long) packets);
+    // No its5_reset() needed: replay_state is stack-local and simply
+    // discarded here, so a truncated/corrupt file can't leave stale parser
+    // state behind for anything else to observe.
+    printf(" %lu packet(s) replayed\n", (unsigned long)packets);
     return packets;
 }
-
 
 // Publish to every connected+enabled broker (non-retained, QoS 0). Returns
 // true if the caller should consider this message "delivered" and move on:
@@ -340,27 +421,35 @@ static bool mqtt_publish(const char *topic, const uint8_t *payload, size_t lengt
     bool published_any = false;
     bool have_disconnected_enabled_broker = false;
 
-    for (mqtt_broker_t *b : brokers) {
-        if (!mqtt_broker_enabled(*b)) {
+    for (mqtt_broker_t *b : brokers)
+    {
+        if (!mqtt_broker_enabled(*b))
+        {
             continue;
         }
-        if (!b->client.connected()) {
+        if (!b->client.connected())
+        {
             have_disconnected_enabled_broker = true;
             continue;
         }
-        if (b->client.publish(topic, payload, length)) {
+        if (b->client.publish(topic, payload, length))
+        {
             published_any = true;
         }
     }
-    if (published_any) {
+    if (published_any)
+    {
         stats_count(1);
     }
     return published_any || !have_disconnected_enabled_broker;
 }
 
+
+
 static bool mqtt_connect(mqtt_broker_t &b)
 {
-    if (b.client.connected()) {
+    if (b.client.connected())
+    {
         // already connected
         return true;
     }
@@ -373,26 +462,35 @@ static bool mqtt_connect(mqtt_broker_t &b)
     strlcpy(user, config_get_value(String(b.prefix) + "_user").c_str(), sizeof(user));
     strlcpy(pass, config_get_value(String(b.prefix) + "_pass").c_str(), sizeof(pass));
     int port = config_get_value(String(b.prefix) + "_broker_port").toInt();
-    if (strlen(host) == 0) {
+    if (strlen(host) == 0)
+    {
         // this broker slot is not configured, do not attempt to connect
         return false;
     }
-    if (strcmp(proto, "mqtts") == 0) {
-        if (strcmp(config_get_value(String(b.prefix) + "_insecure").c_str(), "true") == 0) {
+    if (strcmp(proto, "mqtts") == 0)
+    {
+        if (strcmp(config_get_value(String(b.prefix) + "_insecure").c_str(), "true") == 0)
+        {
             b.secureClient.setInsecure();
-        } else {
+        }
+        else
+        {
             b.secureClient.setCACert(rootCA.c_str());
         }
         b.client.setClient(b.secureClient);
-    } else {
+    }
+    else
+    {
         b.client.setClient(b.plainClient);
     }
     b.client.setServer(host, port);
-    b.client.setBufferSize(2500);
+    b.client.setBufferSize(mqtt_buffer_bytes);
     bool result;
     char *userp = NULL;
-    char *passp = NULL;;
-    if (strlen(user) > 0) {
+    char *passp = NULL;
+    ;
+    if (strlen(user) > 0)
+    {
         userp = user;
         passp = pass;
     }
@@ -407,13 +505,16 @@ static bool mqtt_connect(mqtt_broker_t &b)
     result = b.client.connect(clientId.c_str(), userp, passp, mqtt_status_topic, 0, true, "offline", true);
     uint32_t duration = millis() - t0;
     printf(" %d ms...", duration);
-    if (result) {
+    if (result)
+    {
         printf("connected!\n");
         b.client.publish(mqtt_status_topic, "online", true);
         b.client.publish(mqtt_info_topic, mqtt_info);
         b.connect_delay = 1000;
         b.next_connect = 0;
-    } else {
+    }
+    else
+    {
         printf("failed to connect, rc=%d\n", b.client.state());
         mqtt_schedule_reconnect(b);
     }
@@ -427,7 +528,8 @@ static void handleWifiEvent(WiFiEvent_t event)
 
 static int do_wifi(int argc, char *argv[])
 {
-    if (argc > 1) {
+    if (argc > 1)
+    {
         printf("Disconnecting...\n");
         WiFi.disconnect(true, true);
         delay(2000);
@@ -454,6 +556,21 @@ static int do_network(int argc, char *argv[])
     return status == WL_CONNECTED ? 0 : status;
 }
 
+static int do_network_off(int argc, char *argv[])
+{
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return 0;
+}
+
+static int do_network_on(int argc, char *argv[])
+{
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.reconnect();
+    return 0;
+}
+
 static int do_reboot(int argc, char *argv[])
 {
     ESP.restart();
@@ -477,11 +594,15 @@ static int do_datetime(int argc, char *argv[])
 
 static int do_disconnect(int argc, char *argv[])
 {
-    for (mqtt_broker_t *b : brokers) {
-        if (b->client.connected()) {
+    for (mqtt_broker_t *b : brokers)
+    {
+        if (b->client.connected())
+        {
             b->client.disconnect();
             printf("Disconnected from %s broker\n", b->prefix);
-        } else {
+        }
+        else
+        {
             printf("Not connected to %s broker\n", b->prefix);
         }
     }
@@ -506,7 +627,8 @@ static size_t create_info(char *info, size_t size)
 
 static int do_mqtt(int argc, char *argv[])
 {
-    for (mqtt_broker_t *b : brokers) {
+    for (mqtt_broker_t *b : brokers)
+    {
         printf("--- %s ---\n", b->prefix);
         printf("enabled: %s\n", mqtt_broker_enabled(*b) ? "yes" : "no");
         printf("host: %s:%s\n", config_get_value(String(b->prefix) + "_broker_host").c_str(),
@@ -532,7 +654,8 @@ static int do_ota(int argc, char *argv[])
 static int do_config(int argc, char *argv[])
 {
     File f = LittleFS.open("/config.json", "r");
-    if (f) {
+    if (f)
+    {
         Serial.println(f.readString());
         f.close();
     }
@@ -551,10 +674,11 @@ static int do_sysinfo(int argc, char *argv[])
 
 static int do_tx(int argc, char *argv[])
 {
-    if (argc > 1) {
+    if (argc > 1)
+    {
         int tx_power = atoi(argv[1]);
         printf("Setting TX power to %d dBm\n", tx_power);
-        WiFi.setTxPower((wifi_power_t) (4 * tx_power));
+        WiFi.setTxPower((wifi_power_t)(4 * tx_power));
     }
     printf("Current TX power: %d dBm\n", WiFi.getTxPower() / 4);
     return 0;
@@ -566,7 +690,8 @@ static int do_stats(int argc, char *argv[])
     stats_get(&stats);
     printf("latest: %d\n", stats.latest);
     printf("counts:");
-    for (int i = 0; i < 60; i++) {
+    for (int i = 0; i < 60; i++)
+    {
         printf(" %d", stats.counts[i]);
     }
     printf("\n");
@@ -575,7 +700,8 @@ static int do_stats(int argc, char *argv[])
 
 static int do_sniffer(int argc, char *argv[])
 {
-    if (!sniffer_stats_valid) {
+    if (!sniffer_stats_valid)
+    {
         printf("No sniffer statistics received yet\n");
         return -1;
     }
@@ -584,24 +710,31 @@ static int do_sniffer(int argc, char *argv[])
     printf("Sniffer sent packets: %lu\n", sniffer_stats.sentPackets);
     printf("Sniffer dropped packets: %lu\n", sniffer_stats.droppedPackets);
     printf("Sniffer queue: %u/%u\n", sniffer_stats.queued, sniffer_stats.queueSize);
-    if (sniffer_stats.haveRssi) {
+    if (sniffer_stats.haveRssi)
+    {
         printf("Sniffer RSSI: %d dBm\n", sniffer_stats.rssi);
-    } else {
+    }
+    else
+    {
         printf("Sniffer RSSI: unavailable\n");
     }
-    if (sniffer_stats.haveTemp) {
+    if (sniffer_stats.haveTemp)
+    {
         printf("Sniffer temp: %.1f C\n", sniffer_stats.tempC);
-    } else {
+    }
+    else
+    {
         printf("Sniffer temp: unavailable\n");
     }
     return 0;
 }
 
-static int do_sd(int argc, char *argv[])
+static int do_sdinfo(int argc, char *argv[])
 {
     printf("available: %s\n", sd_available ? "yes" : "no");
-    printf("packets written since boot: %lu\n", (unsigned long) sd_packets_written);
-    if (!sd_available) {
+    printf("packets written since boot: %lu\n", (unsigned long)sd_packets_written);
+    if (!sd_available)
+    {
         return -1;
     }
     printf("card size: %llu MB\n", SD.cardSize() / (1024ULL * 1024ULL));
@@ -609,25 +742,30 @@ static int do_sd(int argc, char *argv[])
 
     uint32_t count = 0;
     File dir = SD.open(sd_log_dir);
-    if (dir) {
-        for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-            if (!f.isDirectory()) {
+    if (dir)
+    {
+        for (File f = dir.openNextFile(); f; f = dir.openNextFile())
+        {
+            if (!f.isDirectory())
+            {
                 count++;
             }
             f.close();
         }
         dir.close();
     }
-    printf("log files: %lu\n", (unsigned long) count);
-    if (sd_log_file) {
-        printf("current log: %u bytes written this session\n", (unsigned) sd_log_file.size());
+    printf("log files: %lu\n", (unsigned long)count);
+    if (sd_log_file)
+    {
+        printf("current log: %u bytes written this session\n", (unsigned)sd_log_file.size());
     }
     return 0;
 }
 
 static int do_sdreplay(int argc, char *argv[])
 {
-    if (!sd_available) {
+    if (!sd_available)
+    {
         printf("SD card not available\n");
         return -1;
     }
@@ -641,43 +779,58 @@ static int do_sdreplay(int argc, char *argv[])
     // still open for writing elsewhere is undefined behaviour here, not
     // just unwanted.
     bool delete_after = (argc > 1 && strcmp(argv[1], "delete") == 0);
-    if (argc > 1 && !delete_after) {
+    if (argc > 1 && !delete_after)
+    {
         printf("Unknown option '%s' (only \"delete\" is supported)\n", argv[1]);
         return -1;
     }
 
     File dir = SD.open(sd_log_dir);
-    if (!dir) {
+    if (!dir)
+    {
         printf("Cannot open %s\n", sd_log_dir);
         return -1;
     }
     uint32_t files = 0;
     uint32_t deleted = 0;
-    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-        if (f.isDirectory()) {
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile())
+    {
+        if (f.isDirectory())
+        {
             f.close();
             continue;
         }
         String path = sd_full_path(sd_log_dir, f.name());
         bool is_current = sd_log_file && strcmp(sd_basename(path.c_str()), sd_basename(sd_log_file.name())) == 0;
-        printf("Replaying %s (%u bytes)...", f.name(), (unsigned) f.size());
-        sd_replay_file(f);
+        printf("Replaying %s (%u bytes)...", f.name(), (unsigned)f.size());
+        if (is_current)
+        {
+            printf(" (active log file, not interleaving live capture)");
+        }
+        sd_replay_file(f, !is_current);
         f.close();
         files++;
-        if (delete_after) {
-            if (is_current) {
+        if (delete_after)
+        {
+            if (is_current)
+            {
                 printf("Not deleting %s: still this session's active log file\n", path.c_str());
-            } else if (SD.remove(path)) {
+            }
+            else if (SD.remove(path))
+            {
                 deleted++;
-            } else {
+            }
+            else
+            {
                 printf("Failed to delete %s\n", path.c_str());
             }
         }
     }
     dir.close();
-    printf("Replay complete: %lu file(s)", (unsigned long) files);
-    if (delete_after) {
-        printf(", %lu deleted", (unsigned long) deleted);
+    printf("Replay complete: %lu file(s)", (unsigned long)files);
+    if (delete_after)
+    {
+        printf(", %lu deleted", (unsigned long)deleted);
     }
     printf("\n");
     return 0;
@@ -685,35 +838,41 @@ static int do_sdreplay(int argc, char *argv[])
 
 static int do_sddelete(int argc, char *argv[])
 {
-    if (!sd_available) {
+    if (!sd_available)
+    {
         printf("SD card not available\n");
         return -1;
     }
-    if (argc < 2 || strcmp(argv[1], "yes") != 0) {
+    if (argc < 2 || strcmp(argv[1], "yes") != 0)
+    {
         printf("This deletes ALL log files on the SD card. Re-run as: sddelete yes\n");
         return -1;
     }
 
     // Close (and stop writing to) the current session's log file before
     // possibly deleting it out from under an open handle.
-    if (sd_log_file) {
+    if (sd_log_file)
+    {
         sd_log_file.close();
     }
 
     uint32_t deleted = 0;
     File dir = SD.open(sd_log_dir);
-    if (dir) {
-        for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    if (dir)
+    {
+        for (File f = dir.openNextFile(); f; f = dir.openNextFile())
+        {
             bool is_dir = f.isDirectory();
             String path = sd_full_path(sd_log_dir, f.name());
             f.close();
-            if (!is_dir && SD.remove(path)) {
+            if (!is_dir && SD.remove(path))
+            {
                 deleted++;
             }
         }
         dir.close();
     }
-    printf("Deleted %lu log file(s)\n", (unsigned long) deleted);
+    printf("Deleted %lu log file(s)\n", (unsigned long)deleted);
 
     // Resume logging with a fresh file (counter restarts at 1 since none
     // remain, which is fine -- there's nothing left for it to collide with).
@@ -726,13 +885,16 @@ static int do_sddelete(int argc, char *argv[])
 // missing argument means "the current directory itself".
 static String sd_resolve_path(const char *arg)
 {
-    if (!arg || arg[0] == '\0') {
+    if (!arg || arg[0] == '\0')
+    {
         return sd_cwd;
     }
-    if (arg[0] == '/') {
+    if (arg[0] == '/')
+    {
         return String(arg);
     }
-    if (strcmp(arg, "..") == 0) {
+    if (strcmp(arg, "..") == 0)
+    {
         int slash = sd_cwd.lastIndexOf('/');
         return slash <= 0 ? String("/") : sd_cwd.substring(0, slash);
     }
@@ -743,21 +905,27 @@ static String sd_resolve_path(const char *arg)
 // habit (Unix or Windows) works at this prompt.
 static int do_sdls(int argc, char *argv[])
 {
-    if (!sd_available) {
+    if (!sd_available)
+    {
         printf("SD card not available\n");
         return -1;
     }
     String path = sd_resolve_path(argc > 1 ? argv[1] : nullptr);
     File dir = SD.open(path);
-    if (!dir || !dir.isDirectory()) {
+    if (!dir || !dir.isDirectory())
+    {
         printf("Not a directory: %s\n", path.c_str());
         return -1;
     }
-    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-        if (f.isDirectory()) {
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile())
+    {
+        if (f.isDirectory())
+        {
             printf("%10s  %s/\n", "<DIR>", sd_basename(f.name()));
-        } else {
-            printf("%10u  %s\n", (unsigned) f.size(), sd_basename(f.name()));
+        }
+        else
+        {
+            printf("%10u  %s\n", (unsigned)f.size(), sd_basename(f.name()));
         }
         f.close();
     }
@@ -768,13 +936,15 @@ static int do_sdls(int argc, char *argv[])
 
 static int do_sdcd(int argc, char *argv[])
 {
-    if (!sd_available) {
+    if (!sd_available)
+    {
         printf("SD card not available\n");
         return -1;
     }
     String path = argc > 1 ? sd_resolve_path(argv[1]) : String("/");
     File dir = SD.open(path);
-    if (!dir || !dir.isDirectory()) {
+    if (!dir || !dir.isDirectory())
+    {
         printf("No such directory: %s\n", path.c_str());
         return -1;
     }
@@ -786,11 +956,13 @@ static int do_sdcd(int argc, char *argv[])
 
 static int do_sdrm(int argc, char *argv[])
 {
-    if (!sd_available) {
+    if (!sd_available)
+    {
         printf("SD card not available\n");
         return -1;
     }
-    if (argc < 2) {
+    if (argc < 2)
+    {
         printf("Usage: rm <filename>\n");
         return -1;
     }
@@ -798,11 +970,13 @@ static int do_sdrm(int argc, char *argv[])
     // Refuse to remove whatever this session is still actively logging to
     // -- SD.remove() on a file that's also open for writing elsewhere is
     // undefined behaviour here, not just an inconvenience.
-    if (sd_log_file && strcmp(sd_basename(path.c_str()), sd_basename(sd_log_file.name())) == 0) {
+    if (sd_log_file && strcmp(sd_basename(path.c_str()), sd_basename(sd_log_file.name())) == 0)
+    {
         printf("Refusing to remove %s: still this session's active log file\n", path.c_str());
         return -1;
     }
-    if (!SD.remove(path)) {
+    if (!SD.remove(path))
+    {
         printf("Failed to remove %s (not found, or it's a directory -- rm only removes files)\n", path.c_str());
         return -1;
     }
@@ -817,21 +991,27 @@ static uint32_t sd_delete_recursive(const char *path)
 {
     uint32_t deleted = 0;
     File dir = SD.open(path);
-    if (!dir) {
+    if (!dir)
+    {
         return 0;
     }
-    if (!dir.isDirectory()) {
+    if (!dir.isDirectory())
+    {
         dir.close();
         return 0;
     }
-    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile())
+    {
         bool is_dir = f.isDirectory();
         String child = sd_full_path(path, f.name());
         f.close();
-        if (is_dir) {
+        if (is_dir)
+        {
             deleted += sd_delete_recursive(child.c_str());
             SD.rmdir(child);
-        } else if (SD.remove(child)) {
+        }
+        else if (SD.remove(child))
+        {
             deleted++;
         }
     }
@@ -839,36 +1019,10 @@ static uint32_t sd_delete_recursive(const char *path)
     return deleted;
 }
 
-static int do_sdformat(int argc, char *argv[])
-{
-    if (!sd_available) {
-        printf("SD card not available\n");
-        return -1;
-    }
-    if (argc < 2 || strcmp(argv[1], "yes") != 0) {
-        printf("This deletes EVERYTHING reachable on the SD card, not just log files.\n"
-               "(Not a real low-level FAT format -- the SD library used here doesn't\n"
-               "expose one -- just a recursive delete of every file/directory it can see.)\n"
-               "Re-run as: format yes\n");
-        return -1;
-    }
-    if (sd_log_file) {
-        sd_log_file.close();
-    }
-    uint32_t deleted = sd_delete_recursive("/");
-    sd_cwd = "/";
-    printf("Deleted %lu file(s)\n", (unsigned long) deleted);
-
-    if (!SD.exists(sd_log_dir)) {
-        SD.mkdir(sd_log_dir);
-    }
-    sd_log_begin();
-    return 0;
-}
-
 int do_cpu(int argc, char *argv[])
 {
-    if (argc > 1) {
+    if (argc > 1)
+    {
         int mhz = atoi(argv[1]);
         printf("Setting CPU speed to %d MHz\n", mhz);
         setCpuFrequencyMhz(mhz);
@@ -880,16 +1034,19 @@ int do_cpu(int argc, char *argv[])
 int do_ls(int argc, char *argv[])
 {
     File root = LittleFS.open("/");
-    if (!root) {
+    if (!root)
+    {
         printf("Failed to open root directory\n");
         return -1;
     }
-    if (!root.isDirectory()) {
+    if (!root.isDirectory())
+    {
         printf("Root is not a directory\n");
         return -1;
     }
     File file = root.openNextFile();
-    while (file) {
+    while (file)
+    {
         printf("%6u %s\n", file.size(), file.name());
         file = root.openNextFile();
     }
@@ -897,31 +1054,31 @@ int do_ls(int argc, char *argv[])
 }
 
 static const cmd_t commands[] = {
-    { "wifi", do_wifi, "[<ssid> [password]] Configure WIFi" },
-    { "network", do_network, "Show network status" },
-    { "reboot", do_reboot, "Reboot" },
-    { "datetime", do_datetime, "Display date and time" },
-    { "disconnect", do_disconnect, "Disconnect from MQTT" },
-    { "led", do_led, "[state]Toggle LED" },
-    { "mqtt", do_mqtt, "Show mqtt information" },
-    { "ota", do_ota, "Show OTA update information" },
-    { "config", do_config, "Show configuration" },
-    { "sysinfo", do_sysinfo, "Show system information" },
-    { "tx", do_tx, "Set WiFi tx power" },
-    { "stats", do_stats, "Show statistic internals" },
-    { "sniffer", do_sniffer, "Show last received sniffer statistics" },
-    { "sd", do_sd, "Show SD card logging status" },
-    { "sdreplay", do_sdreplay, "[delete] Republish all SD log files to MQTT (and delete each afterwards)" },
-    { "sddelete", do_sddelete, "<yes> Delete all SD log files" },
-    { "cpu", do_cpu, "<MHz> Set CPU speed" },
-    { "lsfs", do_ls, "List files on the internal (LittleFS) filesystem" },
-    { "ls", do_sdls, "[<dir>] List an SD card directory (alias: dir)" },
-    { "dir", do_sdls, "[<dir>] List an SD card directory (alias: ls)" },
-    { "cd", do_sdcd, "[<dir>] Change SD card directory (no arg = root)" },
-    { "rm", do_sdrm, "<file> Delete one file from the SD card" },
-    { "format", do_sdformat, "<yes> Recursively delete EVERYTHING on the SD card" },
-    { NULL, NULL, NULL }
-};
+    {"wifi", do_wifi, "[<ssid> [password]] Configure WIFi"},
+    {"network", do_network, "Show network status"},
+    {"network_off", do_network_off, "Disconnect Wifi"},
+    {"network_on", do_network_on, "Reconnect Wifi"},
+    {"reboot", do_reboot, "Reboot"},
+    {"datetime", do_datetime, "Display date and time"},
+    {"disconnect", do_disconnect, "Disconnect from MQTT"},
+    {"led", do_led, "[state]Toggle LED"},
+    {"mqtt", do_mqtt, "Show mqtt information"},
+    {"ota", do_ota, "Show OTA update information"},
+    {"config", do_config, "Show configuration"},
+    {"sysinfo", do_sysinfo, "Show system information"},
+    {"tx", do_tx, "Set WiFi tx power"},
+    {"stats", do_stats, "Show statistic internals"},
+    {"sniffer", do_sniffer, "Show last received sniffer statistics"},
+    {"sdinfo", do_sdinfo, "Show SD card logging status"},
+    {"sdreplay", do_sdreplay, "[delete] Republish all SD log files to MQTT (and delete each afterwards)"},
+    {"sddelete", do_sddelete, "<yes> Delete all SD log files"},
+    {"cpu", do_cpu, "<MHz> Set CPU speed"},
+    {"lsfs", do_ls, "List files on the internal (LittleFS) filesystem"},
+    {"sdls", do_sdls, "[<dir>] List an SD card directory (alias: dir)"},
+    {"sddir", do_sdls, "[<dir>] List an SD card directory (alias: ls)"},
+    {"sdcd", do_sdcd, "[<dir>] Change SD card directory (no arg = root)"},
+    {"sdrm", do_sdrm, "<file> Delete one file from the SD card"},
+    {NULL, NULL, NULL}};
 
 void setup(void)
 {
@@ -932,14 +1089,29 @@ void setup(void)
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, HIGH);
 
-    blue_led(true);
+    blue_led(false);
 
     Serial.begin(115200);
-    Serial.println("Hello from ESP32-C3 bridge!");
+    Serial.println("Hello from ESP32-C3 bridge, your brave packet over serial transmitter");
 
     // Keep the USB console on UART0 and use UART2 (U2RX/U2TX on this
     // board's silkscreen) for packet input.
-    Serial1.begin(115200, SERIAL_8N1, packet_rx_pin, packet_tx_pin);
+    //
+    // 921600 baud (up from 115200): a short direct board-to-board wire, not
+    // a long/noisy RS-232 run, so the higher rate is reliable, and 115200
+    // (~11.5 KB/s) was a real sustained-throughput ceiling in a busy RF
+    // environment -- see esp32-c5-sniffer.ino's Serial0.begin() comment.
+    // Must match that baud exactly; a mismatch produces framing garbage,
+    // not a graceful fallback, so both firmwares need reflashing together.
+    //
+    // setRxBufferSize() must be called before begin(); the default (256
+    // bytes) is only ~2.8ms of headroom at this baud, easily eaten by a
+    // single blocking mqtt_publish()/SD flush/OTA chunk elsewhere in
+    // loop() -- past that, the UART driver silently drops bytes and the
+    // parser resyncs on the next frame, quietly losing whatever was
+    // mid-flight. See serial1_rx_buffer_bytes above for its sizing.
+    Serial1.setRxBufferSize(serial1_rx_buffer_bytes);
+    Serial1.begin(921600, SERIAL_8N1, packet_rx_pin, packet_tx_pin);
 
     // SD card packet logging, see SD_CARD.md for wiring. Uses the VSPI bus
     // (freed above by moving the sniffer link off it), so must come after
@@ -950,7 +1122,8 @@ void setup(void)
     uint64_t chipid = ESP.getEfuseMac();
     char *pid = esp_id;
     char *pemac = esp_mac;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 6; i++)
+    {
         pid += sprintf(pid, "%02x", chipid & 0xFF);
         pemac += sprintf(pemac, (i < 5) ? "%02x:" : "%02x", chipid & 0xFF);
         chipid >>= 8;
@@ -972,13 +1145,14 @@ void setup(void)
 
     WiFi.softAP(device_hostname.c_str(), wifi_ap_password);
     printf("WiFi setup AP: %s / %s at http://%s/wifi\n",
-        device_hostname.c_str(), wifi_ap_password,
-        WiFi.softAPIP().toString().c_str());
+           device_hostname.c_str(), wifi_ap_password,
+           WiFi.softAPIP().toString().c_str());
 
     // load settings, save defaults if necessary
     LittleFS.begin();
     config_begin(LittleFS, "/config.json");
-    if (!config_load()) {
+    if (!config_load())
+    {
         config_set_value("ntp_server", "pool.ntp.org");
         config_set_value("mqtt_insecure", "true");
         config_set_value("mqtt_protocol", "mqtts");
@@ -1010,11 +1184,14 @@ void setup(void)
 
     printf("Reading root CA certificate...");
     File f = LittleFS.open("/isrgrootx1.pem", "r");
-    if (f) {
+    if (f)
+    {
         rootCA = f.readString();
         f.close();
         printf("OK\n");
-    } else {
+    }
+    else
+    {
         printf("Failed\n");
     }
 
@@ -1025,29 +1202,115 @@ void setup(void)
     // --upload-port <device_hostname>.local`. ArduinoOTA registers its own
     // mDNS service on top of the MDNS.begin() call above.
     String ota_password = config_get_value("ota_password");
-    if (ota_password.length() > 0) {
+    if (ota_password.length() > 0)
+    {
         ArduinoOTA.setPassword(ota_password.c_str());
-    } else {
+    }
+    else
+    {
         printf("WARNING: ota_password is not set, OTA updates are unauthenticated\n");
     }
     ArduinoOTA.setHostname(ota_hostname);
-    ArduinoOTA.onStart([]() {
-        printf("OTA update starting (%s)\n", ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem");
-    });
-    ArduinoOTA.onEnd([]() {
-        printf("OTA update complete, rebooting\n");
-    });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        printf("OTA progress: %u%%\r", total > 0 ? (progress * 100) / total : 0);
-    });
-    ArduinoOTA.onError([](ota_error_t error) {
-        printf("OTA error [%u]\n", error);
-    });
+    ArduinoOTA.onStart([]()
+                       { printf("OTA update starting (%s)\n", ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem"); });
+    ArduinoOTA.onEnd([]()
+                     { printf("OTA update complete, rebooting\n"); });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
+                          { printf("OTA progress: %u%%\r", total > 0 ? (progress * 100) / total : 0); });
+    ArduinoOTA.onError([](ota_error_t error)
+                       { printf("OTA error [%u]\n", error); });
     ArduinoOTA.begin();
     printf("OTA update hostname: %s.local\n", ota_hostname);
 
     int mhz = config_get_value("sys_cpu_speed").toInt();
     printf("Switching to %d MHz...%s\n", mhz, setCpuFrequencyMhz(mhz) ? "OK" : "FAILED");
+}
+
+// Drains up to `max_bytes` currently-available Serial1 bytes through the
+// live parser state, handling at most one resulting frame per call: a
+// STATS frame updates sniffer_stats, a heartbeat (zero-length PACKET) is
+// just logged, and a real packet frame gets SD-logged + MQTT-published
+// exactly like any other live packet. Called both from loop() and from
+// inside sd_replay_file(), so a long replay still services live traffic
+// instead of leaving it to sit in Serial1's buffer for the whole replay --
+// safe to call from both places because it only ever touches
+// live_parser_state, never sd_replay_file()'s own (separate) parser state.
+static void service_live_serial(uint32_t max_bytes)
+{
+    // Drain complete ITS5 frames until we have one data packet to forward.
+    // Stats, heartbeats, and unknown frame types are consumed here, so they
+    // cannot be mistaken for packets or block a later stats update.
+    bool have_packet = pending_frame_valid;
+    uint32_t serial_bytes = 0;
+    while (!have_packet && Serial1.available() > 0 && serial_bytes < max_bytes)
+    {
+        int c = Serial1.read();
+        serial_bytes++;
+        if (!its5_parse(&live_parser_state, c & 0xFF, &its5_frame))
+        {
+            continue;
+        }
+
+        if (its5_frame.type == ITS5_TYPE_STATS)
+        {
+            // Sniffer statistics belong to the CLI/MQTT status data, not the
+            // packet archive.
+            if (its5_frame.len == sizeof(sniffer_stats_t))
+            {
+                memcpy(&sniffer_stats, its5_frame.payload, sizeof(sniffer_stats_t));
+                sniffer_stats_valid = true;
+                sniffer_stats_received_ms = millis();
+            }
+            else
+            {
+                printf("Ignoring sniffer stats frame with unexpected size %u (expected %u)\n",
+                       its5_frame.len, (unsigned)sizeof(sniffer_stats_t));
+            }
+            continue;
+        }
+
+        if (its5_frame.type != ITS5_TYPE_PACKET)
+        {
+            printf("Ignoring ITS5 frame with unknown type %u\n", its5_frame.type);
+            continue;
+        }
+
+        if (its5_frame.len == 0)
+        {
+            // Zero-length ITS5 packet is the sniffer heartbeat/keepalive.
+            printf(".");
+            continue;
+        }
+
+        pending_frame = its5_frame;
+        pending_frame_valid = true;
+        have_packet = true;
+    }
+
+    if (have_packet)
+    {
+        // Consume this frame before any potentially failing I/O. In
+        // particular, an MQTT failure must not cause the same frame to be
+        // appended to SD again on every subsequent loop iteration.
+        pending_frame_valid = false;
+
+        ieee80211_t ieee;
+        if (parse_ieee80211(pending_frame.payload, pending_frame.len, &ieee) > 0)
+        {
+            printf("IEEE 802.11 packet from %02x:%02x:%02x:%02x:%02x:%02x, sequence control: %04x, %d bytes\n",
+                   ieee.source_mac[0], ieee.source_mac[1], ieee.source_mac[2], ieee.source_mac[3],
+                   ieee.source_mac[4], ieee.source_mac[5], ieee.sequence_ctrl, pending_frame.len);
+
+            blue_led(true);
+            sd_log_packet(pending_frame);
+            mqtt_publish(mqtt_packet_topic, pending_frame.payload, pending_frame.len);
+            blue_led(false);
+        }
+        else
+        {
+            printf("Invalid IEEE 802.11 packet received\n");
+        }
+    }
 }
 
 void loop(void)
@@ -1059,24 +1322,28 @@ void loop(void)
 
     // network status
     bool online = (WiFi.status() == WL_CONNECTED) && (time(nullptr) > 1700000000L);
-    if (lastWifiEvent != wifiEvent) {
+    if (lastWifiEvent != wifiEvent)
+    {
         lastWifiEvent = wifiEvent;
         printf("WiFi event: %s\n", NetworkEvents::eventName(wifiEvent));
     }
     bool any_broker_connected = false;
-    for (mqtt_broker_t *b : brokers) {
-        if (b->client.connected()) {
+    for (mqtt_broker_t *b : brokers)
+    {
+        if (b->client.connected())
+        {
             any_broker_connected = true;
             break;
         }
     }
-    blue_led(ms < 500 ? !online : !any_broker_connected);
 
     // Keep each MQTT broker connected with its own capped exponential
     // reconnect backoff; one broker being down never blocks the other.
-    for (mqtt_broker_t *b : brokers) {
+    for (mqtt_broker_t *b : brokers)
+    {
         if (online && mqtt_broker_enabled(*b) && !b->client.connected() &&
-                (b->next_connect == 0 || millis() >= b->next_connect)) {
+            (b->next_connect == 0 || millis() >= b->next_connect))
+        {
             mqtt_connect(*b);
         }
         b->client.loop();
@@ -1085,101 +1352,42 @@ void loop(void)
     // handle any pending OTA update
     ArduinoOTA.handle();
 
-    // watch for incoming packets
-    bool have_packet = pending_frame_valid;
-    uint32_t serial_bytes = 0;
-    uint8_t serial_sample[16];
-    size_t serial_sample_size = 0;
-    while (!have_packet && Serial1.available() > 0 && serial_bytes < max_serial_bytes_per_loop) {
-        int c = Serial1.read();
-        if (serial_sample_size < sizeof(serial_sample)) {
-            serial_sample[serial_sample_size++] = c & 0xFF;
-        }
-        serial_bytes++;
-        if (its5_parse(c & 0xFF, &its5_frame)) {
-            pending_frame = its5_frame;
-            pending_frame_valid = true;
-            have_packet = true;
-        }
-    }
-    if (have_packet && pending_frame.type == ITS5_TYPE_STATS) {
-        // sniffer statistics frame: store it for the "sniffer" CLI command
-        // and the periodic MQTT stats publish below, rather than treating
-        // it as a captured 802.11 packet.
-        if (pending_frame.len == sizeof(sniffer_stats_t)) {
-            memcpy(&sniffer_stats, pending_frame.payload, sizeof(sniffer_stats_t));
-            sniffer_stats_valid = true;
-            sniffer_stats_received_ms = millis();
-        } else {
-            printf("Ignoring sniffer stats frame with unexpected size %u (expected %u)\n",
-                pending_frame.len, (unsigned) sizeof(sniffer_stats_t));
-        }
-        pending_frame_valid = false;
-    } else if (have_packet && pending_frame.len == 0) {
-        // zero-length ITS5 frame (e.g. a sniffer heartbeat/keepalive):
-        // just show a heartbeat dot, nothing to parse or publish, and
-        // deliberately not routed through mqtt_publish()/stats_count() --
-        // it's not a real packet, so it shouldn't count as one.
-        printf(".");
-        pending_frame_valid = false;
-    } else if (have_packet) {
-        // Log to SD first, independent of MQTT connectivity -- a broker
-        // outage should never mean a captured packet is lost, only that
-        // it's not been forwarded live yet (see the "sdreplay" command).
-        sd_log_packet(pending_frame);
-
-        // send over mqtt
-        blue_led(true);
-        bool packet_sent = mqtt_publish(
-            mqtt_packet_topic, pending_frame.payload, pending_frame.len);
-        if (packet_sent) {
-            pending_frame_valid = false;
-            printf("Got packet %d bytes\n", pending_frame.len);
-        }
-        blue_led(false);
-
-        // log to console
-        ieee80211_t ieee;
-        if (packet_sent && parse_ieee80211(packet, pending_frame.len, &ieee) > 0) {
-            printf
-                ("IEEE 802.11 packet from %02x:%02x:%02x:%02x:%02x:%02x, sequence control: %04x\n",
-                    ieee.source_mac[0], ieee.source_mac[1], ieee.source_mac[2], ieee.source_mac[3],
-                    ieee.source_mac[4], ieee.source_mac[5], ieee.sequence_ctrl);
-        }
-    }
+    service_live_serial(max_serial_bytes_per_loop);
 
     // keep stats up-to-date
-    if (stats_update()) {
-        StaticJsonDocument < 384 > doc;
+    if (stats_update())
+    {
+        StaticJsonDocument<384> doc;
         doc["temp"] = temperatureRead();
         doc["rssi"] = WiFi.RSSI();
-        if (sniffer_stats_valid) {
-            JsonObject sniffer = doc["sniffer"].to < JsonObject > ();
+        if (sniffer_stats_valid)
+        {
+            JsonObject sniffer = doc["sniffer"].to<JsonObject>();
             sniffer["uptime_ms"] = sniffer_stats.uptimeMs;
             sniffer["sent"] = sniffer_stats.sentPackets;
             sniffer["dropped"] = sniffer_stats.droppedPackets;
             sniffer["queued"] = sniffer_stats.queued;
             sniffer["queue_size"] = sniffer_stats.queueSize;
-            if (sniffer_stats.haveRssi) {
+            if (sniffer_stats.haveRssi)
+            {
                 sniffer["rssi"] = sniffer_stats.rssi;
             }
-            if (sniffer_stats.haveTemp) {
+            if (sniffer_stats.haveTemp)
+            {
                 sniffer["temp_c"] = sniffer_stats.tempC;
             }
             sniffer["age_ms"] = millis() - sniffer_stats_received_ms;
         }
-        JsonObject sd = doc["sd"].to < JsonObject > ();
-        sd["found"] = sd_available;
-        sd["packets_written"] = sd_packets_written;
-        uint8_t json[384];
+        JsonObject sd = doc["sd"].to<JsonObject>();
+        sd["sdcard"] = sd_available;
+        sd["sd_packets_written"] = sd_packets_written;
+        uint8_t json[512];
         size_t size = serializeJson(doc, json);
-        if ((size > 0) && mqtt_publish(mqtt_stats_topic, json, size)) {
+        if ((size > 0) && mqtt_publish(mqtt_stats_topic, json, size))
+        {
             printf("Published %s: %s\n", mqtt_stats_topic, json);
         }
     }
     // command line processing
     shell.process(">", commands);
-
-    // spend some time in low-power mode
-    delay(50);
 }

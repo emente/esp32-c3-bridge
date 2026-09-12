@@ -1,6 +1,14 @@
-Sniffer (esp32-c5-sniffer) TX -> ESP32 GPIO16 (U2RX)
-Sniffer RX -> ESP32 GPIO17 (U2TX)
+Fork of https://github.com/bertrik/its-g5-receiver/
+
+This version adds sd-card support for wardriving and maximized packet reception performance.
+
+# hardware serial link 
+
+Sniffer (esp32-c5-sniffer) TX -> ESP32 GPIO17 (U2RX)
+Sniffer RX -> ESP32 GPIO16 (U2TX)
 Sniffer GND -> ESP32 GND
+
+Use a short or shielded cable, we are using 921600 baud for the serial link.
 
 See SD_CARD.md for the SD card wiring (VSPI bus, freed up by the pins above).
 
@@ -137,7 +145,4 @@ access to the setup AP or a fresh `uploadfs`.
 ## Use
 Power can be provided either through the USB-C port, or through the 5V / GND connection from the esp32-c5 sniffer board.
 
-The LED starts blue while initializing the WiFi and MQTT connections.
-It turns off when the connection to the MQTT server has been established.
-
-The LED briefly flashes blue on reception and processing of a packet from the esp32-c5 sniffer.
+The blue LED briefly flashes blue on reception and processing of a packet from the esp32-c5 sniffer.
