@@ -7,3 +7,4 @@
 .vscode/ipch
 compile_commands.json
 _*.md
+sync-repos.cmd
